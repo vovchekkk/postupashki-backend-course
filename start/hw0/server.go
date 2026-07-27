@@ -20,8 +20,7 @@ func main() {
 		conn, err := listener.Accept()
 		if err != nil {
 			fmt.Println(err)
-			conn.Close()
-			return
+			continue
 		}
 
 		go handleConnection(conn, message)

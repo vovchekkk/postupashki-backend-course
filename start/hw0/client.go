@@ -7,16 +7,18 @@ import (
 
 func main() {
 	expectedMessage := "OK\n"
+	bufferSize := 1024
 	conn, err := net.Dial("tcp", "127.0.0.1:8080")
+
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	defer conn.Close()
 
-	input := make([]byte, 1024)
+	input := make([]byte, bufferSize)
 	n, err := conn.Read(input)
-	if n == 0 || err != nil {
+	if err != nil {
 		fmt.Println("Read error:", err)
 		return
 	}
