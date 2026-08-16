@@ -2,86 +2,48 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
-	"net"
+	"net/http"
 	"os"
 	"log"
 	"errors"
 	"sync"
 	"time"
 	"flag"
-	"net/url"
 	"strings"
 )
 
-func connect(ctx context.Context, scheme, url string) (net.Conn, error) {
-	var dialer net.Dialer
-	if scheme == "https" {
-		tlsDialer := tls.Dialer{NetDialer: &dialer}
-		return tlsDialer.DialContext(ctx, "tcp", url)
-	}
-
-	return dialer.DialContext(ctx, "tcp", url)
-}
-
-func request(ctx context.Context, conn net.Conn, path string, host string) ([]byte, error) {
-	httpRequest := "GET " + path + " HTTP/1.1\r\n" +
-		"Host: " + host + "\r\n" +
-		"Connection: close\r\n" +
-		"\r\n"
-
-	if deadline, ok := ctx.Deadline(); ok {
-		if err := conn.SetDeadline(deadline); err != nil {
-			return nil, err
-		}
-	}
-
-	if _, err := conn.Write([]byte(httpRequest)); err != nil {
-		return nil, err
-	}
-
-	httpResponse, err := io.ReadAll(conn)
+func request(ctx context.Context, rawUrl string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawUrl, nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		return nil, err
 	}
-
-	return httpResponse, nil
-}
-
-func prepareUrl(rawUrl string) (string, string, string, string, error) {
-	if !strings.HasPrefix(rawUrl, "http://") && !strings.HasPrefix(rawUrl, "https://") {
-		rawUrl = "https://" + rawUrl
-	}
-
-	parsedUrl, err := url.Parse(rawUrl)
+	
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "", "", "", err
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	path := parsedUrl.RequestURI()
-	if path == "" {
-		path = "/"
-	}
+	response := fmt.Sprintf(
+		"HTTP/%d.%d %s\r\n%s\r\n%s",
+		resp.ProtoMajor,
+		resp.ProtoMinor,
+		resp.Status,
+		resp.Header,
+		body,
+	)
 
-	scheme := parsedUrl.Scheme
-
-	host := parsedUrl.Hostname()
-
-	port := parsedUrl.Port()
-	if port == "" {
-		if parsedUrl.Scheme == "http" {
-			port = "80"
-		} else {
-			port = "443"
-		}
-	}
-
-	return path, scheme, host, port, nil
+	return []byte(response), nil
 }
 
 type RequestResult struct {
@@ -98,28 +60,7 @@ func sendRequestToUrl(ctx context.Context, rawUrl string, sendCh chan<- RequestR
 	default:
 	}
 
-	path, scheme, host, port, err := prepareUrl(rawUrl)
-	if err != nil {
-		select {
-			case sendCh <- RequestResult{Err: fmt.Errorf("Неверный URL '%s': %w", rawUrl, err)}:
-			case <-ctx.Done():
-		}
-		return
-	}
-
-	url := net.JoinHostPort(host, port)
-
-	conn, err := connect(ctx, scheme, url)
-	if err != nil {
-		select {
-			case sendCh <- RequestResult{Err: fmt.Errorf("Ошибка подключения к '%s': %w", rawUrl, err)}:
-			case <-ctx.Done():
-		}
-		return
-	}
-	defer conn.Close()
-
-	resp, err := request(ctx, conn, path, host)
+	resp, err := request(ctx, rawUrl)
 	if err != nil {
 		select {
 			case sendCh <- RequestResult{Err: fmt.Errorf("Ошибка запроса к '%s': %w", rawUrl, err)}:
@@ -176,6 +117,7 @@ type Config struct {
 	Timeout time.Duration
 }
 
+var ErrInvalidTimeout = errors.New("timeout must be greater than 0")
 var ErrNoURLsProvided = errors.New("at least one URL must be specified")
 
 func parse() (Config, error) {
@@ -185,6 +127,10 @@ func parse() (Config, error) {
 	flag.IntVar(&timeoutSec, "timeout", 15, "timeout for all http requests in seconds")
 
 	flag.Parse()
+
+	if timeoutSec <= 0 {
+		return Config{}, fmt.Errorf("Invalid command line arguments: %w", ErrInvalidTimeout)
+	}
 
 	urls := flag.Args()
 
@@ -215,7 +161,7 @@ func init() {
 func main() {
 	config, err := parse()
 	if err != nil {
-		if errors.Is(err, ErrNoURLsProvided) {
+		if errors.Is(err, ErrInvalidTimeout) || errors.Is(err, ErrNoURLsProvided) {
 			log.Printf("Configuration error: %v", err)
 			flag.Usage()
 			os.Exit(1)
